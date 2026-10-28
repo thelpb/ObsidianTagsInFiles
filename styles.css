@@ -1,0 +1,33 @@
+/* Bubbles next to file names in the file explorer.
+   Each bubble sets --ptb-color; style one value from a CSS snippet with e.g.
+   .ptb-bubble[data-value="inprogress"] { --ptb-color: hotpink; } */
+
+.nav-file-title:has(> .ptb-bubbles) > .nav-file-title-content {
+	min-width: 0;
+	flex-grow: 0;
+}
+
+body.property-bubbles-align-right .nav-file-title:has(> .ptb-bubbles) > .nav-file-title-content {
+	flex-grow: 1;
+}
+
+.ptb-bubbles {
+	display: inline-flex;
+	align-items: center;
+	flex-shrink: 0;
+	gap: 4px;
+	margin-left: 6px;
+}
+
+.ptb-bubble {
+	--ptb-color: var(--text-muted);
+	padding: 0 6px;
+	border-radius: 999px;
+	border: 1px solid color-mix(in srgb, var(--ptb-color) 45%, transparent);
+	background-color: color-mix(in srgb, var(--ptb-color) 18%, transparent);
+	/* Pull the text toward the theme's text color so light colors stay readable on light themes. */
+	color: color-mix(in srgb, var(--ptb-color) 70%, var(--text-normal));
+	font-size: var(--font-ui-smaller);
+	line-height: 1.5;
+	white-space: nowrap;
+}

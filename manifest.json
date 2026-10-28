@@ -1,0 +1,10 @@
+{
+	"id": "property-bubbles",
+	"name": "Property Bubbles",
+	"version": "1.0.0",
+	"minAppVersion": "1.4.0",
+	"description": "Shows a frontmatter property, such as a ticket's status, as a small colored bubble next to each file name in the file explorer, and can sort files by it.",
+	"author": "thelpb",
+	"authorUrl": "https://github.com/thelpb",
+	"isDesktopOnly": false
+}
