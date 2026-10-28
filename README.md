@@ -27,6 +27,8 @@ status: In Progress
 - **Property names** match regardless of case (`Status` works for `status`).
 - Notes without the property show nothing.
 
+<img width="308" height="234" alt="image" src="https://github.com/user-attachments/assets/22b0f645-5930-4f18-968f-c0506e85503a" />
+
 ## Settings
 
 | Setting | Default | What it does |
