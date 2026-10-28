@@ -37,6 +37,25 @@ status: In Progress
 | Automatic colors | on | Values with no color set get a color of their own, the same one every time. When off they're gray. |
 | Value colors | Backlog, To Do, In Progress, Review, Blocked, Done | A color for each value. Matching ignores case, spaces, dashes and underscores, so `in-progress` and `IN_PROGRESS` use the `In Progress` color. |
 
+## Sorting
+
+The plugin can also sort files in the file explorer by a property, so a ticket folder reads Backlog → To Do → In Progress → Done from top to bottom. It's off by default. Turn it on in any of three ways:
+
+- **Settings → Property Bubbles → Sorting**: sort every folder or only chosen ones.
+- **Right-click a folder → Sort by status**: sorts that folder and its subfolders. Right-click it again and choose **Stop sorting by status** to undo.
+- **Command palette**: *Toggle sorting by property* turns sorting on and off; *Reverse the property sort order* flips it. You can bind either to a hotkey.
+
+| Setting | Default | What it does |
+|---|---|---|
+| Sort files by property | Off | Off, in every folder, or only in chosen folders. |
+| Folders | (empty) | With "Only in chosen folders": one folder path per line, e.g. `Projects/Tickets`. Subfolders are sorted too; `/` means the whole vault. |
+| Sort property | (blank) | The property to sort by. Blank uses the first one in **Properties**. For a list property, its first item counts. |
+| Order | Value order | **Value order** follows the Value colors list (reorder it with the arrows), then puts other values alphabetically after it. **Alphabetical** ignores the list. Numbers sort naturally (`Item 9` before `Item 10`). |
+| Reverse order | off | Sort the other way round. |
+| Files without the property | At the bottom | Where notes without the property go. They stay there when the order is reversed. |
+
+Folders stay above files, as Obsidian always puts them. Files with the same value keep the order picked in the file explorer's own sort menu (name, modified time, ...), so that sort still breaks ties. A file moves as soon as you change its property.
+
 ## Styling with CSS snippets
 
 Each bubble is a `span.ptb-bubble` with `data-property` (the property name) and `data-value` (the value, lowercase, with spaces and punctuation removed). Its color comes from `--ptb-color`:
@@ -62,4 +81,5 @@ To try it out, open [example-vault](example-vault) as a vault in Obsidian, insta
 
 - [main.js](main.js) is the whole plugin (CommonJS, loaded directly by Obsidian). [styles.css](styles.css) styles the bubbles.
 - The file explorer adds and reuses its rows as folders open and the list scrolls, so the plugin watches each explorer with a `MutationObserver` and adds bubbles to new rows. It also updates a note's bubble when its frontmatter changes (`metadataCache` `changed`) and after renames.
-- Tests cover the parsing and color helpers: `node --test tests/helpers.test.js` (Node 18 or later). Without Node installed, VS Code's Electron can run them: set `ELECTRON_RUN_AS_NODE=1` and run `Code.exe --test tests/helpers.test.js`.
+- Sorting wraps the file explorer view's `getSortedFolderItems(folder)` (internal Obsidian API, checked against 1.14.5), which returns a folder's items with subfolders first. The wrapper re-sorts the files and calls the view's `requestSort()` when a sort value or setting changes. Turning the plugin off removes the wrapper. If a future Obsidian drops the method, sorting quietly does nothing and the bubbles still work.
+- Tests cover the parsing, color and sorting helpers and the sort wrapper: `node --test tests/helpers.test.js` (Node 18 or later). Without Node installed, VS Code's Electron can run them: set `ELECTRON_RUN_AS_NODE=1` and run `Code.exe --test tests/helpers.test.js`.

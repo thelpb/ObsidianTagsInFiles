@@ -7,19 +7,58 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const Module = require('node:module');
 
+class TFile {
+	constructor(path, frontmatter) {
+		this.path = path;
+		this.frontmatter = frontmatter;
+	}
+}
+class TFolder {
+	constructor(path) {
+		this.path = path;
+	}
+}
+
 const originalLoad = Module._load;
 Module._load = function (request, ...rest) {
 	if (request === 'obsidian') {
 		class Plugin {}
 		class PluginSettingTab {}
-		return { Plugin, PluginSettingTab, Setting: class {}, TFile: class {}, debounce: (fn) => fn };
+		return { Notice: class {}, Plugin, PluginSettingTab, Setting: class {}, TFile, TFolder, debounce: (fn) => fn };
 	}
 	return originalLoad.call(this, request, ...rest);
 };
 const plugin = require('../main.js');
 Module._load = originalLoad;
 
-const { normalizeKey, parsePropertyNames, getProperty, toDisplayValues, resolveColor, truncate, bubblesFor, isRelevantMutation } = plugin._internals;
+const {
+	DEFAULT_SETTINGS, normalizeKey, parsePropertyNames, getProperty, toDisplayValues, resolveColor, truncate, bubblesFor,
+	isRelevantMutation, sortPropertyName, normalizeFolderPath, isFolderSorted, compareSortValues,
+} = plugin._internals;
+
+// A plugin instance with just enough of the app for sorting.
+function makePlugin(overrides) {
+	const instance = Object.create(plugin.prototype);
+	instance.settings = { ...DEFAULT_SETTINGS, sortMode: 'all', ...overrides };
+	instance.app = { metadataCache: { getFileCache: (file) => ({ frontmatter: file.frontmatter }) } };
+	instance.patchedViews = new Set();
+	instance.sortValues = new Map();
+	return instance;
+}
+
+// Items as the explorer returns them: folders first, then files in Obsidian's order.
+function folderItems() {
+	return [
+		{ file: new TFolder('Tickets/Archive') },
+		{ file: new TFile('Tickets/a.md', { status: 'Done' }) },
+		{ file: new TFile('Tickets/b.md', {}) },
+		{ file: new TFile('Tickets/c.md', { status: 'Backlog' }) },
+		{ file: new TFile('Tickets/d.md', { status: 'Someday' }) },
+		{ file: new TFile('Tickets/e.md', { Status: 'in progress' }) },
+		{ file: new TFile('Tickets/f.md', { status: 'Backlog' }) },
+	];
+}
+const names = (items) => items.map((item) => item.file.path.split('/').pop());
 
 test('exports the plugin class as module and default export', () => {
 	assert.equal(typeof plugin, 'function');
@@ -91,4 +130,96 @@ test('isRelevantMutation ignores the plugin\'s own bubble insertions', () => {
 	assert.equal(isRelevantMutation({ type: 'childList', addedNodes: [{ nodeType: 3 }] }), false);
 	assert.equal(isRelevantMutation({ type: 'childList', addedNodes: [el('tree-item')] }), true);
 	assert.equal(isRelevantMutation({ type: 'attributes', addedNodes: [] }), true);
+});
+
+test('sortPropertyName falls back to the first shown property', () => {
+	assert.equal(sortPropertyName({ sortProperty: ' priority ', properties: 'status' }), 'priority');
+	assert.equal(sortPropertyName({ sortProperty: '', properties: 'stage, labels' }), 'stage');
+	assert.equal(sortPropertyName({ sortProperty: '', properties: '' }), 'status');
+});
+
+test('normalizeFolderPath trims slashes and maps blank to the root', () => {
+	assert.equal(normalizeFolderPath(' /Projects/Tickets/ '), 'Projects/Tickets');
+	assert.equal(normalizeFolderPath('/'), '/');
+	assert.equal(normalizeFolderPath(''), '/');
+});
+
+test('isFolderSorted covers off, every folder, and chosen folders with subfolders', () => {
+	assert.equal(isFolderSorted('Tickets', { sortMode: 'off', sortFolders: ['Tickets'] }), false);
+	assert.equal(isFolderSorted('Anything', { sortMode: 'all', sortFolders: [] }), true);
+	const chosen = { sortMode: 'folders', sortFolders: ['Tickets'] };
+	assert.equal(isFolderSorted('Tickets', chosen), true);
+	assert.equal(isFolderSorted('Tickets/2026', chosen), true);
+	assert.equal(isFolderSorted('TicketsOld', chosen), false);
+	assert.equal(isFolderSorted('/', chosen), false);
+	assert.equal(isFolderSorted('Notes', { sortMode: 'folders', sortFolders: ['/'] }), true);
+});
+
+test('compareSortValues orders by value list, then alphabetically, with missing values pinned', () => {
+	const settings = { ...DEFAULT_SETTINGS, sortOrder: 'values' };
+	const sorted = (values, s) => values.slice().sort((a, b) => compareSortValues(a, b, s));
+	const values = ['Done', null, 'Zeta', 'backlog', 'Alpha', 'In Progress'];
+	assert.deepEqual(sorted(values, settings), ['backlog', 'In Progress', 'Done', 'Alpha', 'Zeta', null]);
+	assert.deepEqual(sorted(values, { ...settings, sortDescending: true }), ['Zeta', 'Alpha', 'Done', 'In Progress', 'backlog', null]);
+	assert.deepEqual(sorted(values, { ...settings, missingLast: false }), [null, 'backlog', 'In Progress', 'Done', 'Alpha', 'Zeta']);
+	assert.deepEqual(sorted(values, { ...settings, sortOrder: 'alphabetical' }), ['Alpha', 'backlog', 'Done', 'In Progress', 'Zeta', null]);
+	assert.deepEqual(sorted(['Item 10', 'Item 9'], { ...settings, sortOrder: 'alphabetical' }), ['Item 9', 'Item 10'], 'numbers sort naturally');
+});
+
+test('sortFolderItems keeps folders first and ties in Obsidian order', () => {
+	const instance = makePlugin();
+	const result = instance.sortFolderItems(new TFolder('Tickets'), folderItems());
+	assert.deepEqual(names(result), ['Archive', 'c.md', 'f.md', 'e.md', 'a.md', 'd.md', 'b.md']);
+	assert.equal(instance.sortValues.get('Tickets/e.md'), 'in progress');
+	assert.equal(instance.sortValues.get('Tickets/b.md'), null);
+});
+
+test('sortFolderItems leaves folders outside the scope alone', () => {
+	const instance = makePlugin({ sortMode: 'folders', sortFolders: ['Projects'] });
+	const items = folderItems();
+	assert.equal(instance.sortFolderItems(new TFolder('Tickets'), items), items);
+});
+
+test('patchExplorer wraps the view\'s sort and unpatching restores it', () => {
+	class FakeExplorerView {
+		constructor() {
+			this.sorts = 0;
+		}
+		getSortedFolderItems() {
+			return folderItems();
+		}
+		requestSort() {
+			this.sorts++;
+		}
+	}
+	const instance = makePlugin();
+	const view = new FakeExplorerView();
+	assert.equal(instance.patchExplorer(view), true);
+	assert.equal(instance.patchExplorer(view), false, 'patches only once');
+	assert.deepEqual(names(view.getSortedFolderItems(new TFolder('Tickets'))), ['Archive', 'c.md', 'f.md', 'e.md', 'a.md', 'd.md', 'b.md']);
+
+	instance.settings.sortMode = 'off';
+	assert.deepEqual(names(view.getSortedFolderItems(new TFolder('Tickets'))), ['Archive', 'a.md', 'b.md', 'c.md', 'd.md', 'e.md', 'f.md']);
+
+	instance.unpatchExplorer(view);
+	assert.equal(Object.prototype.hasOwnProperty.call(view, 'getSortedFolderItems'), false);
+	assert.equal(view.sorts, 1, 'unpatching re-sorts');
+	assert.equal(instance.patchExplorer({}), false, 'skips views without the method');
+});
+
+test('resortIfMoved re-sorts only when the sort value changes', () => {
+	const instance = makePlugin();
+	let resorts = 0;
+	instance.requestResort = () => resorts++;
+	instance.patchedViews.add({});
+	const file = new TFile('Tickets/a.md', { status: 'Done' });
+	file.parent = new TFolder('Tickets');
+	instance.sortValues.set(file.path, 'Done');
+	instance.resortIfMoved(file);
+	assert.equal(resorts, 0);
+	file.frontmatter = { status: 'Backlog' };
+	instance.resortIfMoved(file);
+	assert.equal(resorts, 1);
+	instance.resortIfMoved(new TFile('New.md', { status: 'Done' }));
+	assert.equal(resorts, 2, 'a file not sorted yet re-sorts when its folder is sorted');
 });
