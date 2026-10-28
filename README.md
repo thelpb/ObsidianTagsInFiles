@@ -51,12 +51,15 @@ The plugin can also sort files in the file explorer by a property, so a ticket f
 |---|---|---|
 | Sort files by property | Off | Off, in every folder, or only in chosen folders. |
 | Folders | (empty) | With "Only in chosen folders": one folder path per line, e.g. `Projects/Tickets`. Subfolders are sorted too; `/` means the whole vault. |
-| Sort property | (blank) | The property to sort by. Blank uses the first one in **Properties**. For a list property, its first item counts. |
-| Order | Value order | **Value order** follows the Value colors list (reorder it with the arrows), then puts other values alphabetically after it. **Alphabetical** ignores the list. Numbers sort naturally (`Item 9` before `Item 10`). |
-| Reverse order | off | Sort the other way round. |
+| Group by property | (blank) | Files with the same value of this property form a group. Blank uses the first one in **Properties**. For a list property, its first item counts. Spellings that match the same color (`To Do`, `to-do`) are one group. |
+| Group order | Custom order | **Custom order** puts groups in the order of **Custom group order**, then other values alphabetically after them. **Alphabetical** ignores it. Numbers sort naturally (`Item 9` before `Item 10`). |
+| Custom group order | (empty) | One value per line, top group first, e.g. `In Progress`, `To Do`, `Backlog`, `Done`. Empty uses the order of the Value colors list (reorder it with the arrows); the copy button fills it in from that list. |
+| Reverse group order | off | Flips the order of the groups. The order inside each group is unchanged. |
 | Files without the property | At the bottom | Where notes without the property go. They stay there when the order is reversed. |
+| Sort within each group | Same as the file explorer | How files inside a group are ordered: the file explorer's own sort menu, file name, modified time, created time (each either way round), or another property. |
+| Sort within groups by | (blank) | With "Another property": the property to sort by, e.g. `priority` or `due`. Files without it go last in their group. |
 
-Folders stay above files, as Obsidian always puts them. Files with the same value keep the order picked in the file explorer's own sort menu (name, modified time, ...), so that sort still breaks ties. A file moves as soon as you change its property.
+Folders stay above files, as Obsidian always puts them. A file moves as soon as you change its property (or, when sorting within groups by modified time, as soon as you edit it).
 
 ## Styling with CSS snippets
 
