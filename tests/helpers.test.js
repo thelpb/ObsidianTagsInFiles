@@ -8,9 +8,11 @@ const assert = require('node:assert/strict');
 const Module = require('node:module');
 
 class TFile {
-	constructor(path, frontmatter) {
+	constructor(path, frontmatter, stat = { mtime: 0, ctime: 0 }) {
 		this.path = path;
+		this.basename = path.split('/').pop().replace(/\.md$/, '');
 		this.frontmatter = frontmatter;
+		this.stat = stat;
 	}
 }
 class TFolder {
@@ -33,7 +35,8 @@ Module._load = originalLoad;
 
 const {
 	DEFAULT_SETTINGS, normalizeKey, parsePropertyNames, getProperty, toDisplayValues, resolveColor, truncate, bubblesFor,
-	isRelevantMutation, sortPropertyName, normalizeFolderPath, isFolderSorted, compareSortValues,
+	isRelevantMutation, sortPropertyName, normalizeFolderPath, isFolderSorted, compareSortValues, compareWithinValues,
+	groupOrderKeys, parseWithinSort,
 } = plugin._internals;
 
 // A plugin instance with just enough of the app for sorting.
@@ -164,14 +167,54 @@ test('compareSortValues orders by value list, then alphabetically, with missing 
 	assert.deepEqual(sorted(values, { ...settings, missingLast: false }), [null, 'backlog', 'In Progress', 'Done', 'Alpha', 'Zeta']);
 	assert.deepEqual(sorted(values, { ...settings, sortOrder: 'alphabetical' }), ['Alpha', 'backlog', 'Done', 'In Progress', 'Zeta', null]);
 	assert.deepEqual(sorted(['Item 10', 'Item 9'], { ...settings, sortOrder: 'alphabetical' }), ['Item 9', 'Item 10'], 'numbers sort naturally');
+	assert.equal(compareSortValues('To Do', 'to-do', settings), 0, 'spellings of one value are one group');
+	assert.equal(compareSortValues('Some Day', 'someday', settings), 0, 'also for values without a rule');
+});
+
+test('groupOrderKeys uses the custom group order, or the value colors list when it is empty', () => {
+	assert.deepEqual(groupOrderKeys({ ...DEFAULT_SETTINGS, groupOrder: ['Done', 'In Progress', ' '] }), ['done', 'inprogress']);
+	assert.deepEqual(groupOrderKeys(DEFAULT_SETTINGS), ['backlog', 'todo', 'inprogress', 'review', 'blocked', 'done']);
+	const settings = { ...DEFAULT_SETTINGS, groupOrder: ['Done', 'Backlog'] };
+	const sorted = ['Backlog', 'In Progress', 'done'].sort((a, b) => compareSortValues(a, b, settings));
+	assert.deepEqual(sorted, ['done', 'Backlog', 'In Progress']);
+});
+
+test('parseWithinSort reads the kind and direction', () => {
+	assert.equal(parseWithinSort({ withinSort: 'explorer', withinProperty: '' }), null);
+	assert.equal(parseWithinSort({ withinSort: 'property', withinProperty: ' ' }), null, 'no property means no sort');
+	assert.equal(parseWithinSort({ withinSort: 'modified-desc', withinProperty: '' }).descending, true);
+	assert.equal(parseWithinSort({ withinSort: 'name', withinProperty: '' }).descending, false);
+});
+
+test('compareWithinValues sorts numbers and text naturally with missing values last', () => {
+	const sorted = (values, descending) => values.slice().sort((a, b) => compareWithinValues(a, b, descending));
+	assert.deepEqual(sorted([10, null, 9], false), [9, 10, null]);
+	assert.deepEqual(sorted(['P10', 'P9', null, 'p1'], true), ['P10', 'P9', 'p1', null]);
 });
 
 test('sortFolderItems keeps folders first and ties in Obsidian order', () => {
 	const instance = makePlugin();
 	const result = instance.sortFolderItems(new TFolder('Tickets'), folderItems());
 	assert.deepEqual(names(result), ['Archive', 'c.md', 'f.md', 'e.md', 'a.md', 'd.md', 'b.md']);
-	assert.equal(instance.sortValues.get('Tickets/e.md'), 'in progress');
-	assert.equal(instance.sortValues.get('Tickets/b.md'), null);
+	assert.equal(JSON.parse(instance.sortValues.get('Tickets/e.md')).group, 'in progress');
+	assert.equal(JSON.parse(instance.sortValues.get('Tickets/b.md')).group, null);
+});
+
+test('sortFolderItems sorts files within each group', () => {
+	const items = () => [
+		{ file: new TFile('T/a.md', { status: 'Done', priority: 2 }, { mtime: 3, ctime: 1 }) },
+		{ file: new TFile('T/b.md', { status: 'to-do', priority: 10 }, { mtime: 1, ctime: 2 }) },
+		{ file: new TFile('T/c.md', { status: 'Done' }, { mtime: 2, ctime: 3 }) },
+		{ file: new TFile('T/d.md', { status: 'To Do', priority: 1 }, { mtime: 4, ctime: 4 }) },
+	];
+	const sort = (overrides) => names(makePlugin(overrides).sortFolderItems(new TFolder('T'), items()));
+	assert.deepEqual(sort({}), ['b.md', 'd.md', 'a.md', 'c.md'], 'explorer order inside groups');
+	assert.deepEqual(sort({ withinSort: 'name-desc' }), ['d.md', 'b.md', 'c.md', 'a.md']);
+	assert.deepEqual(sort({ withinSort: 'modified-desc' }), ['d.md', 'b.md', 'a.md', 'c.md']);
+	assert.deepEqual(sort({ withinSort: 'created' }), ['b.md', 'd.md', 'a.md', 'c.md']);
+	assert.deepEqual(sort({ withinSort: 'property', withinProperty: 'priority' }), ['d.md', 'b.md', 'a.md', 'c.md']);
+	assert.deepEqual(sort({ withinSort: 'name-desc', sortDescending: true }), ['c.md', 'a.md', 'd.md', 'b.md'], 'reversing groups keeps the order inside them');
+	assert.deepEqual(sort({ groupOrder: ['Done', 'To Do'] }), ['a.md', 'c.md', 'b.md', 'd.md']);
 });
 
 test('sortFolderItems leaves folders outside the scope alone', () => {
@@ -214,7 +257,7 @@ test('resortIfMoved re-sorts only when the sort value changes', () => {
 	instance.patchedViews.add({});
 	const file = new TFile('Tickets/a.md', { status: 'Done' });
 	file.parent = new TFolder('Tickets');
-	instance.sortValues.set(file.path, 'Done');
+	instance.sortValues.set(file.path, JSON.stringify(instance.sortKeyOf(file)));
 	instance.resortIfMoved(file);
 	assert.equal(resorts, 0);
 	file.frontmatter = { status: 'Backlog' };
@@ -222,4 +265,10 @@ test('resortIfMoved re-sorts only when the sort value changes', () => {
 	assert.equal(resorts, 1);
 	instance.resortIfMoved(new TFile('New.md', { status: 'Done' }));
 	assert.equal(resorts, 2, 'a file not sorted yet re-sorts when its folder is sorted');
+
+	instance.settings.withinSort = 'modified-desc';
+	instance.sortValues.set(file.path, JSON.stringify(instance.sortKeyOf(file)));
+	file.stat = { mtime: 5, ctime: 0 };
+	instance.resortIfMoved(file);
+	assert.equal(resorts, 3, 'an edit re-sorts when files are sorted by modified time');
 });

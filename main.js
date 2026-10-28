@@ -28,10 +28,24 @@ const DEFAULT_SETTINGS = {
 	sortFolders: [],
 	// Blank means the first of `properties`.
 	sortProperty: '',
-	// 'values' follows the order of `rules`; 'alphabetical' ignores it.
+	// 'values' follows groupOrder (or `rules` when it's empty); 'alphabetical' ignores both.
 	sortOrder: 'values',
+	// Group values in display order, one per entry. Empty means the order of `rules`.
+	groupOrder: [],
 	sortDescending: false,
 	missingLast: true,
+	// How files in the same group are ordered: 'explorer' keeps Obsidian's order, otherwise one of
+	// WITHIN_SORTS, with a '-desc' suffix for the reverse.
+	withinSort: 'explorer',
+	// The property withinSort 'property' sorts by.
+	withinProperty: '',
+};
+
+const WITHIN_SORTS = {
+	name: (file) => file.basename,
+	modified: (file) => file.stat?.mtime ?? null,
+	created: (file) => file.stat?.ctime ?? null,
+	property: (file, frontmatter, settings) => firstValue(frontmatter, settings.withinProperty.trim()),
 };
 
 // Used by autoColor: the same value always lands on the same color.
@@ -130,23 +144,46 @@ function isFolderSorted(folderPath, settings) {
 
 const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
 
-// Values with a rule sort in list order, before values without one.
-function valueRank(text, rules) {
-	const key = normalizeKey(text);
-	const index = rules.findIndex((r) => r.value && normalizeKey(r.value) === key);
-	return index === -1 ? rules.length : index;
+function firstValue(frontmatter, property) {
+	return toDisplayValues(getProperty(frontmatter, property))[0] ?? null;
+}
+
+// The normalized group values in display order.
+function groupOrderKeys(settings) {
+	const values = settings.groupOrder?.length ? settings.groupOrder : settings.rules.map((r) => r.value);
+	return values.map(normalizeKey).filter(Boolean);
+}
+
+// Listed values sort in list order, before values that aren't listed.
+function valueRank(text, orderKeys) {
+	const index = orderKeys.indexOf(normalizeKey(text));
+	return index === -1 ? orderKeys.length : index;
 }
 
 // a and b are a file's first value of the sort property, or null when it has none.
 // Files without a value stay at the top or bottom whichever way the sort runs.
-function compareSortValues(a, b, settings) {
+// Values that normalize alike ("To Do", "to-do") are the same group and compare equal.
+function compareSortValues(a, b, settings, orderKeys = groupOrderKeys(settings)) {
 	if (a === null || b === null) {
 		if (a === b) return 0;
 		return (a === null) === settings.missingLast ? 1 : -1;
 	}
-	let result = settings.sortOrder === 'values' ? valueRank(a, settings.rules) - valueRank(b, settings.rules) : 0;
-	if (result === 0) result = collator.compare(a, b);
+	let result = settings.sortOrder === 'values' ? valueRank(a, orderKeys) - valueRank(b, orderKeys) : 0;
+	if (result === 0) result = collator.compare(normalizeKey(a), normalizeKey(b));
 	return settings.sortDescending ? -result : result;
+}
+
+// a and b are what WITHIN_SORTS returned for two files in the same group. Missing values go last.
+function compareWithinValues(a, b, descending) {
+	if (a === null || b === null) return a === b ? 0 : a === null ? 1 : -1;
+	const result = typeof a === 'number' && typeof b === 'number' ? a - b : collator.compare(String(a), String(b));
+	return descending ? -result : result;
+}
+
+function parseWithinSort(settings) {
+	const [kind, direction] = String(settings.withinSort || 'explorer').split('-');
+	if (!WITHIN_SORTS[kind] || (kind === 'property' && !settings.withinProperty.trim())) return null;
+	return { valueOf: WITHIN_SORTS[kind], descending: direction === 'desc' };
 }
 
 // Our own bubble insertions also show up as mutations; ignore them so a refresh can't trigger another.
@@ -210,6 +247,7 @@ class PropertyBubblesPlugin extends Plugin {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
 		this.settings.rules = (Array.isArray(data.rules) ? data.rules : DEFAULT_RULES).map((r) => ({ ...r }));
 		this.settings.sortFolders = Array.isArray(data.sortFolders) ? data.sortFolders.slice() : [];
+		this.settings.groupOrder = Array.isArray(data.groupOrder) ? data.groupOrder.slice() : [];
 	}
 
 	async saveSettings() {
@@ -298,29 +336,40 @@ class PropertyBubblesPlugin extends Plugin {
 
 	sortFolderItems(folder, items) {
 		if (!folder || !isFolderSorted(folder.path, this.settings)) return items;
-		const property = sortPropertyName(this.settings);
-		const values = new Map();
+		const settings = this.settings;
+		const orderKeys = groupOrderKeys(settings);
+		const within = parseWithinSort(settings);
+		const keys = new Map();
 		for (const item of items) {
 			if (!(item.file instanceof TFile)) continue;
-			const value = this.sortValueOf(item.file, property);
-			values.set(item, value);
-			this.sortValues.set(item.file.path, value);
+			const key = this.sortKeyOf(item.file, within);
+			keys.set(item, key);
+			this.sortValues.set(item.file.path, JSON.stringify(key));
 		}
-		const folders = items.filter((item) => !values.has(item));
-		const files = items.filter((item) => values.has(item));
-		files.sort((a, b) => compareSortValues(values.get(a), values.get(b), this.settings));
+		const folders = items.filter((item) => !keys.has(item));
+		const files = items.filter((item) => keys.has(item));
+		files.sort((a, b) => {
+			const ka = keys.get(a);
+			const kb = keys.get(b);
+			const result = compareSortValues(ka.group, kb.group, settings, orderKeys);
+			return result || !within ? result : compareWithinValues(ka.within, kb.within, within.descending);
+		});
 		return folders.concat(files);
 	}
 
-	sortValueOf(file, property) {
+	// The file's group value and, when files are sorted within groups, the value they're sorted by.
+	sortKeyOf(file, within = parseWithinSort(this.settings)) {
 		const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
-		return toDisplayValues(getProperty(frontmatter, property))[0] ?? null;
+		return {
+			group: firstValue(frontmatter, sortPropertyName(this.settings)),
+			within: within ? within.valueOf(file, frontmatter, this.settings) : null,
+		};
 	}
 
 	resortIfMoved(file) {
 		if (this.settings.sortMode === 'off' || !this.patchedViews.size) return;
 		const previous = this.sortValues.get(file.path);
-		const current = this.sortValueOf(file, sortPropertyName(this.settings));
+		const current = JSON.stringify(this.sortKeyOf(file));
 		const moved = previous === undefined ? isFolderSorted(file.parent?.path ?? '/', this.settings) : previous !== current;
 		if (moved) this.requestResort();
 	}
@@ -461,7 +510,7 @@ class PropertyBubblesSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Value colors')
-			.setDesc('Matching ignores case, spaces, dashes and underscores, so "In Progress" also matches "in-progress". When sorting by value order, files sort in the order of this list; use the arrows to change it.')
+			.setDesc('Matching ignores case, spaces, dashes and underscores, so "In Progress" also matches "in-progress". Unless you set a custom group order under Sorting, groups sort in the order of this list; use the arrows to change it.')
 			.setHeading();
 
 		settings.rules.forEach((rule, index) => {
@@ -524,7 +573,7 @@ class PropertyBubblesSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Sorting')
-			.setDesc('Sort files in the file explorer by a property. Folders stay on top, and files with the same value keep Obsidian\'s own sort order. You can also right-click a folder to sort just that folder, or use the commands "Toggle sorting by property" and "Reverse the property sort order".')
+			.setDesc('Sort files in the file explorer by a property. Files with the same value form a group; you choose the order of the groups and how files are sorted inside each one. Folders stay on top. You can also right-click a folder to sort just that folder, or use the commands "Toggle sorting by property" and "Reverse the property sort order".')
 			.setHeading();
 
 		new Setting(containerEl)
@@ -558,8 +607,8 @@ class PropertyBubblesSettingTab extends PluginSettingTab {
 		}
 
 		new Setting(containerEl)
-			.setName('Sort property')
-			.setDesc('Leave blank to use the first property shown in bubbles. For list properties, the first item counts.')
+			.setName('Group by property')
+			.setDesc('Files with the same value of this property form a group. Leave blank to use the first property shown in bubbles. For list properties, the first item counts.')
 			.addText((text) => text
 				.setPlaceholder(parsePropertyNames(settings.properties)[0] || 'status')
 				.setValue(settings.sortProperty)
@@ -569,19 +618,45 @@ class PropertyBubblesSettingTab extends PluginSettingTab {
 				}));
 
 		new Setting(containerEl)
-			.setName('Order')
-			.setDesc('Value order follows the Value colors list above (Backlog, To Do, In Progress, ...), then puts other values alphabetically after it.')
+			.setName('Group order')
+			.setDesc('Custom order puts groups in the order you list below, then other values alphabetically after them.')
 			.addDropdown((dropdown) => dropdown
-				.addOption('values', 'Value order')
+				.addOption('values', 'Custom order')
 				.addOption('alphabetical', 'Alphabetical')
 				.setValue(settings.sortOrder)
 				.onChange(async (value) => {
 					settings.sortOrder = value;
 					await this.plugin.saveSettings();
+					this.display();
 				}));
 
+		if (settings.sortOrder === 'values') {
+			new Setting(containerEl)
+				.setName('Custom group order')
+				.setDesc('One value per line, top group first. Matching ignores case, spaces, dashes and underscores. Leave empty to use the order of the Value colors list above.')
+				.addTextArea((text) => {
+					text.inputEl.rows = 6;
+					text
+						.setPlaceholder(settings.rules.map((r) => r.value).filter(Boolean).join('\n'))
+						.setValue(settings.groupOrder.join('\n'))
+						.onChange((value) => {
+							settings.groupOrder = value.split('\n').map((line) => line.trim()).filter(Boolean);
+							this.saveSoon();
+						});
+				})
+				.addExtraButton((button) => button
+					.setIcon('copy')
+					.setTooltip('Fill in from the Value colors list')
+					.onClick(async () => {
+						settings.groupOrder = settings.rules.map((r) => r.value.trim()).filter(Boolean);
+						await this.plugin.saveSettings();
+						this.display();
+					}));
+		}
+
 		new Setting(containerEl)
-			.setName('Reverse order')
+			.setName('Reverse group order')
+			.setDesc('Flips the order of the groups. The order inside each group is set below.')
 			.addToggle((toggle) => toggle
 				.setValue(settings.sortDescending)
 				.onChange(async (value) => {
@@ -599,6 +674,39 @@ class PropertyBubblesSettingTab extends PluginSettingTab {
 					settings.missingLast = value === 'last';
 					await this.plugin.saveSettings();
 				}));
+
+		new Setting(containerEl)
+			.setName('Sort within each group')
+			.setDesc('How files in the same group are ordered. "Same as the file explorer" follows the explorer\'s own sort menu.')
+			.addDropdown((dropdown) => dropdown
+				.addOption('explorer', 'Same as the file explorer')
+				.addOption('name', 'File name (A to Z)')
+				.addOption('name-desc', 'File name (Z to A)')
+				.addOption('modified-desc', 'Modified time (new to old)')
+				.addOption('modified', 'Modified time (old to new)')
+				.addOption('created-desc', 'Created time (new to old)')
+				.addOption('created', 'Created time (old to new)')
+				.addOption('property', 'Another property (A to Z)')
+				.addOption('property-desc', 'Another property (Z to A)')
+				.setValue(settings.withinSort)
+				.onChange(async (value) => {
+					settings.withinSort = value;
+					await this.plugin.saveSettings();
+					this.display();
+				}));
+
+		if (settings.withinSort.startsWith('property')) {
+			new Setting(containerEl)
+				.setName('Sort within groups by')
+				.setDesc('The property that orders files inside each group, e.g. priority or due. Numbers sort naturally; files without it go last.')
+				.addText((text) => text
+					.setPlaceholder('priority')
+					.setValue(settings.withinProperty)
+					.onChange((value) => {
+						settings.withinProperty = value;
+						this.saveSoon();
+					}));
+		}
 	}
 
 	async moveRule(index, offset) {
@@ -616,5 +724,6 @@ module.exports.default = PropertyBubblesPlugin;
 // Exposed for the tests in tests/; Obsidian ignores it.
 module.exports._internals = {
 	DEFAULT_SETTINGS, normalizeKey, parsePropertyNames, getProperty, toDisplayValues, resolveColor, truncate, bubblesFor,
-	isRelevantMutation, sortPropertyName, normalizeFolderPath, isFolderSorted, compareSortValues,
+	isRelevantMutation, sortPropertyName, normalizeFolderPath, isFolderSorted, compareSortValues, compareWithinValues,
+	groupOrderKeys, parseWithinSort,
 };
